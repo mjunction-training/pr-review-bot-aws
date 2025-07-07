@@ -5,7 +5,7 @@
 # - AWS CLI configured with appropriate credentials.
 # - Zip utility installed.
 # - Python 3.9+ installed locally with pip.
-# - All project files (app.py, github_utils.py, mcp_client.py, lambda_function.py, guidelines.md, secret_utils.py, s3_utils.py)
+# - All project files (app.py, github_utils.py, mcp_client.py, lambda_function.py, guidelines.md, secret_utils.py, rag_utils.py)
 #   and requirements.txt in the same directory.
 
 # --- Configuration Variables ---
@@ -17,33 +17,32 @@ HANDLER_FUNCTION="lambda_handler"
 RUNTIME="python3.9" # Or python3.10, python3.11 etc.
 TIMEOUT=600 # Maximum execution time for Lambda (in seconds) - PR reviews can take time
 MEMORY=512 # Memory for Lambda (in MB)
-DESCRIPTION="GitHub PR Review Bot powered by AWS Bedrock (Secrets Manager & S3 KB enabled)"
+DESCRIPTION="GitHub PR Review Bot powered by AWS Bedrock (Secrets Manager & RAG KB enabled)"
 REQUIREMENTS_FILE="requirements.txt"
 ZIP_FILE="pr_review_bot.zip"
 
 # IAM Role ARN for the Lambda function.
 # This role must have permissions for:
 # - AWSLambdaBasicExecutionRole (CloudWatch Logs)
-# - bedrock:InvokeModel, bedrock:ListFoundationModels (for Bedrock access)
+# - bedrock:InvokeModel, bedrock:ListFoundationModels (for Bedrock LLM access)
 # - secretsmanager:GetSecretValue (for retrieving secrets)
-# - s3:GetObject, s3:ListBucket (for S3 knowledge base)
+# - bedrock:Retrieve, bedrock:RetrieveAndGenerate (for Bedrock Knowledge Base access)
 LAMBDA_ROLE_ARN="arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/pr-review-bot-lambda-role" # !!! IMPORTANT: REPLACE THIS WITH YOUR ACTUAL IAM ROLE ARN !!!
 
 # --- Environment Variables for Lambda ---
 # These are configurations for the Lambda function. Secrets will be retrieved from Secrets Manager.
 TRIGGER_TEAM_SLUG="ai-review-bots" # Default from github_utils.py
-BEDROCK_MODEL_ID="anthropic.claude-3-sonnet-20240229-v1:0" # Default from mcp_client.py (can be overridden by secret)
 LOG_LEVEL="INFO" # DEBUG, INFO, WARNING, ERROR
 
 # --- Secrets Manager Configuration ---
 # This is the name of the secret in AWS Secrets Manager that holds your GitHub App credentials.
+# It can also optionally hold BEDROCK_MODEL_ID and BEDROCK_KNOWLEDGE_BASE_ID.
 SECRETS_MANAGER_SECRET_NAME="github/pr-review-bot-secrets" # !!! IMPORTANT: REPLACE THIS WITH YOUR ACTUAL SECRETS MANAGER SECRET NAME !!!
 
-# --- S3 Knowledge Base Configuration ---
-# S3 bucket where example projects are stored for the knowledge base
-EXAMPLE_PROJECT_S3_BUCKET="your-example-projects-s3-bucket" # !!! IMPORTANT: REPLACE THIS WITH YOUR S3 BUCKET NAME !!!
-# S3 prefix (folder) within the bucket where the example project files are located
-EXAMPLE_PROJECT_S3_PREFIX="example-project-1/" # !!! IMPORTANT: REPLACE THIS WITH YOUR S3 PREFIX (e.g., "my-project-kb/") !!!
+# --- Bedrock Knowledge Base Configuration (Optional - can also be in Secrets Manager) ---
+# If you want to specify the Knowledge Base ID via an environment variable instead of Secrets Manager
+# BEDROCK_KNOWLEDGE_BASE_ID="YOUR_BEDROCK_KNOWLEDGE_BASE_ID" # !!! IMPORTANT: REPLACE THIS IF NOT IN SECRETS MANAGER !!!
+BEDROCK_KNOWLEDGE_BASE_ID="" # Leave empty if pulling from Secrets Manager
 
 
 # --- 1. Clean up previous build artifacts ---
@@ -63,7 +62,7 @@ cp github_utils.py package/
 cp mcp_client.py package/
 cp guidelines.md package/
 cp secret_utils.py package/
-cp s3_utils.py package/ # Copy the new s3_utils.py
+cp rag_utils.py package/ # Copy the new rag_utils.py
 
 # --- 4. Create deployment package (ZIP file) ---
 echo "--- Creating deployment package ($ZIP_FILE) ---"
@@ -75,8 +74,12 @@ echo "--- Deploying/Updating Lambda function ---"
 # Check if the Lambda function already exists
 FUNCTION_EXISTS=$(aws lambda get-function --function-name "$LAMBDA_FUNCTION_NAME" --region "$AWS_REGION" 2>/dev/null)
 
-# Define environment variables to pass to Lambda
-LAMBDA_ENV_VARS="TRIGGER_TEAM_SLUG=$TRIGGER_TEAM_SLUG,AWS_REGION=$AWS_REGION,BEDROCK_MODEL_ID=$BEDROCK_MODEL_ID,LOG_LEVEL=$LOG_LEVEL,SECRETS_MANAGER_SECRET_NAME=$SECRETS_MANAGER_SECRET_NAME,EXAMPLE_PROJECT_S3_BUCKET=$EXAMPLE_PROJECT_S3_BUCKET,EXAMPLE_PROJECT_S3_PREFIX=$EXAMPLE_PROJECT_S3_PREFIX"
+# Build environment variables string dynamically
+LAMBDA_ENV_VARS="TRIGGER_TEAM_SLUG=$TRIGGER_TEAM_SLUG,AWS_REGION=$AWS_REGION,LOG_LEVEL=$LOG_LEVEL,SECRETS_MANAGER_SECRET_NAME=$SECRETS_MANAGER_SECRET_NAME"
+if [ -n "$BEDROCK_KNOWLEDGE_BASE_ID" ]; then
+    LAMBDA_ENV_VARS="${LAMBDA_ENV_VARS},BEDROCK_KNOWLEDGE_BASE_ID=$BEDROCK_KNOWLEDGE_BASE_ID"
+fi
+# BEDROCK_MODEL_ID is now primarily sourced from Secrets Manager, no need to explicitly pass here unless as fallback
 
 if [ -z "$FUNCTION_EXISTS" ]; then
     echo "Creating new Lambda function: $LAMBDA_FUNCTION_NAME"

@@ -64,28 +64,22 @@ variable "trigger_team_slug" {
 
 # --- Bedrock Configuration ---
 variable "bedrock_model_id" {
-  description = "The AWS Bedrock model ID to use for reviews."
+  description = "The AWS Bedrock model ID to use for reviews. This can also be stored in Secrets Manager."
   type        = string
   default     = "anthropic.claude-3-sonnet-20240229-v1:0"
 }
 
 # --- Secrets Manager Configuration ---
 variable "secrets_manager_secret_name" {
-  description = "Name for the Secrets Manager secret storing GitHub credentials."
+  description = "Name for the Secrets Manager secret storing GitHub credentials and optionally Bedrock IDs."
   type        = string
   default     = "github/pr-review-bot-secrets"
 }
 
-# --- S3 Knowledge Base Configuration ---
-variable "example_project_s3_bucket" {
-  description = "S3 bucket name where example projects for the knowledge base are stored."
+# --- Bedrock Knowledge Base Configuration ---
+variable "bedrock_knowledge_base_id" {
+  description = "The ID of the AWS Bedrock Knowledge Base to use for RAG. Can be empty if stored in Secrets Manager."
   type        = string
-  # No default here, as it's a required input for S3 knowledge base functionality
-}
-
-variable "example_project_s3_prefix" {
-  description = "S3 prefix (folder) within the bucket where example project files are located (e.g., 'my-project-kb/')."
-  type        = string
-  default     = "" # Can be empty if files are at the root of the bucket
+  default     = ""
 }
 

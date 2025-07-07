@@ -40,9 +40,9 @@ resource "aws_iam_role_policy_attachment" "lambda_logs" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# Inline Policy for Bedrock Access
-resource "aws_iam_role_policy" "bedrock_access" {
-  name = "BedrockAccessPolicy"
+# Inline Policy for Bedrock LLM Access
+resource "aws_iam_role_policy" "bedrock_llm_access" {
+  name = "BedrockLLMAccessPolicy"
   role = aws_iam_role.lambda_execution_role.id
 
   policy = jsonencode({
@@ -80,9 +80,9 @@ resource "aws_iam_role_policy" "secrets_manager_access" {
   })
 }
 
-# Inline Policy for S3 Knowledge Base Access
-resource "aws_iam_role_policy" "s3_knowledge_base_access" {
-  name = "S3KnowledgeBaseAccessPolicy"
+# Inline Policy for Bedrock Knowledge Base Access
+resource "aws_iam_role_policy" "bedrock_kb_access" {
+  name = "BedrockKnowledgeBaseAccessPolicy"
   role = aws_iam_role.lambda_execution_role.id
 
   policy = jsonencode({
@@ -91,13 +91,10 @@ resource "aws_iam_role_policy" "s3_knowledge_base_access" {
       {
         Effect = "Allow",
         Action = [
-          "s3:GetObject",
-          "s3:ListBucket"
+          "bedrock:Retrieve",
+          "bedrock:RetrieveAndGenerate"
         ],
-        Resource = [
-          "arn:aws:s3:::${var.example_project_s3_bucket}",
-          "arn:aws:s3:::${var.example_project_s3_bucket}/*"
-        ]
+        Resource = "arn:aws:bedrock:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:knowledge-base/*" # All knowledge bases. Narrow down if possible.
       }
     ]
   })
@@ -107,7 +104,7 @@ resource "aws_iam_role_policy" "s3_knowledge_base_access" {
 # --- Secrets Manager Secret ---
 resource "aws_secretsmanager_secret" "github_app_secrets" {
   name        = var.secrets_manager_secret_name
-  description = "Stores GitHub App credentials for the PR Review Bot."
+  description = "Stores GitHub App credentials and optional Bedrock IDs for the PR Review Bot."
 
   tags = {
     Project = "PRReviewBot"
@@ -122,7 +119,8 @@ resource "aws_secretsmanager_secret_version" "github_app_secret_version" {
     GITHUB_APP_ID       = var.github_app_id,
     GITHUB_PRIVATE_KEY  = var.github_private_key,
     GITHUB_WEBHOOK_SECRET = var.github_webhook_secret,
-    BEDROCK_MODEL_ID    = var.bedrock_model_id # Optional: if you want to manage model ID as a secret
+    BEDROCK_MODEL_ID    = var.bedrock_model_id, # Can be overridden by secret
+    BEDROCK_KNOWLEDGE_BASE_ID = var.bedrock_knowledge_base_id # Added to secret
   })
 }
 
@@ -134,7 +132,7 @@ resource "aws_lambda_function" "pr_review_bot_lambda" {
   role          = aws_iam_role.lambda_execution_role.arn
   timeout       = var.lambda_timeout
   memory_size   = var.lambda_memory
-  description   = "GitHub PR Review Bot powered by AWS Bedrock and Secrets Manager (S3 KB enabled)."
+  description   = "GitHub PR Review Bot powered by AWS Bedrock (RAG Knowledge Base enabled)."
 
   # The content of the Lambda function.
   # This assumes you have a 'pr_review_bot.zip' file in the same directory as your Terraform config.
@@ -148,10 +146,7 @@ resource "aws_lambda_function" "pr_review_bot_lambda" {
       TRIGGER_TEAM_SLUG         = var.trigger_team_slug
       AWS_REGION                = data.aws_region.current.name
       SECRETS_MANAGER_SECRET_NAME = var.secrets_manager_secret_name
-      EXAMPLE_PROJECT_S3_BUCKET = var.example_project_s3_bucket # New env var
-      EXAMPLE_PROJECT_S3_PREFIX = var.example_project_s3_prefix # New env var
-      # BEDROCK_MODEL_ID is primarily sourced from Secrets Manager, but can be set here as fallback
-      # BEDROCK_MODEL_ID          = var.bedrock_model_id
+      BEDROCK_KNOWLEDGE_BASE_ID = var.bedrock_knowledge_base_id # Passed as env var, can be empty if in secret
     }
   }
 

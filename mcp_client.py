@@ -8,7 +8,7 @@ from pydantic import BaseModel, ValidationError
 
 from github_utils import GitHubUtils
 from secret_utils import SecretUtils
-from s3_utils import S3Utils
+from rag_utils import RAGUtils  # Import RAGUtils
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +42,10 @@ class ParsedReviewOutput(BaseModel):
 # --- Main Client Class ---
 
 class MCPClient:
-    def __init__(self, github_utils: GitHubUtils, secret_utils: SecretUtils, s3_utils: S3Utils):
+    def __init__(self, github_utils: GitHubUtils, secret_utils: SecretUtils, rag_utils: RAGUtils):
         self.github_utils = github_utils
         self.secret_utils = secret_utils
-        self.s3_utils = s3_utils  # Store S3Utils instance
+        self.rag_utils = rag_utils  # Store RAGUtils instance
 
         self.aws_region = os.getenv('AWS_REGION', 'us-east-1')
         self.bedrock_model_id = self.secret_utils.get_bedrock_model_id() or \
@@ -56,17 +56,6 @@ class MCPClient:
             region_name=self.aws_region
         )
         logger.info(f"Initialized Bedrock client for region: {self.aws_region} with model: {self.bedrock_model_id}")
-
-        # S3 Knowledge Base configuration
-        self.example_projects_s3_prefix = os.getenv('EXAMPLE_PROJECT_S3_PREFIX')
-        self.knowledge_base_content = ""
-        if self.example_projects_s3_prefix:
-            logger.info(f"Loading knowledge base from S3 prefix: {self.example_projects_s3_prefix}")
-            self.knowledge_base_content = self.s3_utils.read_project_knowledge_base(self.example_projects_s3_prefix)
-            if not self.knowledge_base_content:
-                logger.warning("Failed to load knowledge base content from S3. Review quality might be impacted.")
-        else:
-            logger.info("EXAMPLE_PROJECT_S3_PREFIX not set. Knowledge base from S3 will not be used.")
 
     @staticmethod
     def load_guidelines() -> str:
@@ -81,31 +70,28 @@ class MCPClient:
 
     # --- Prompt Building Functions ---
 
-    def build_initial_analysis_prompt(self, guidelines: str, diff: str) -> str:
+    def build_initial_analysis_prompt(self, guidelines: str, diff: str, rag_context: Optional[str]) -> str:
         """
         Prompts the LLM to perform an initial analysis of the PR diff
         and identify potential areas for line comments, general comments,
         and security issues. The output should be a JSON structure.
-        Includes optional knowledge base.
+        Includes optional RAG context.
         """
-        knowledge_base_section = ""
-        if self.knowledge_base_content:
-            knowledge_base_section = f"""
-            <knowledge_base_examples>
-            You are provided with example project code from a knowledge base.
-            Refer to these examples for best practices, common patterns, and context
-            when evaluating the pull request. Do NOT copy the examples directly,
-            but use them to inform your review and suggestions.
-
-            {self.knowledge_base_content}
-            </knowledge_base_examples>
+        rag_context_section = ""
+        if rag_context:
+            rag_context_section = f"""
+            <relevant_knowledge_base_context>
+            The following information is retrieved from a knowledge base of example projects and best practices.
+            Use this context to inform your review, identify patterns, and suggest improvements.
+            {rag_context}
+            </relevant_knowledge_base_context>
             """
 
         prompt_content = f"""
             Human: You are an expert code reviewer. Your task is to analyze the provided code changes (diff)
             against the given code review guidelines. Identify potential issues and categorize them.
             Do NOT generate the full comment text yet, just identify the areas.
-            {knowledge_base_section}
+            {rag_context_section}
 
             <review_guidelines>
             {guidelines}
@@ -133,29 +119,30 @@ class MCPClient:
             """
         return prompt_content
 
-    def build_line_comment_prompt(self, guidelines: str, diff: str, identified_issues: List[Dict]) -> str:
+    def build_line_comment_prompt(self, guidelines: str, diff: str, identified_issues: List[Dict],
+                                  rag_context: Optional[str]) -> str:
         """
         Prompts the LLM to generate detailed line comments for specific identified issues.
-        Includes optional knowledge base.
+        Includes optional RAG context.
         """
         issues_str = "\n".join(
             [f"- File: {issue['file']}, Line: {issue['line']}, Reason: {issue['reason']}" for issue in
              identified_issues])
 
-        knowledge_base_section = ""
-        if self.knowledge_base_content:
-            knowledge_base_section = f"""
-            <knowledge_base_examples>
-            Refer to these example project codes for context and best practices:
-            {self.knowledge_base_content}
-            </knowledge_base_examples>
+        rag_context_section = ""
+        if rag_context:
+            rag_context_section = f"""
+            <relevant_knowledge_base_context>
+            Refer to this context from example projects and best practices:
+            {rag_context}
+            </relevant_knowledge_base_context>
             """
 
         prompt_content = f"""
             Human: You are an expert code reviewer. Based on the provided code changes (diff) and guidelines,
             generate detailed, actionable line-specific comments for the following identified issues.
             Focus on clarity, conciseness, and providing solutions or best practices.
-            {knowledge_base_section}
+            {rag_context_section}
 
             <review_guidelines>
             {guidelines}
@@ -181,27 +168,28 @@ class MCPClient:
             """
         return prompt_content
 
-    def build_general_comment_prompt(self, guidelines: str, diff: str, identified_topics: List[Dict]) -> str:
+    def build_general_comment_prompt(self, guidelines: str, diff: str, identified_topics: List[Dict],
+                                     rag_context: Optional[str]) -> str:
         """
         Prompts the LLM to generate detailed general PR comments for specific identified topics.
-        Includes optional knowledge base.
+        Includes optional RAG context.
         """
         topics_str = "\n".join([f"- Topic: {topic['topic']}" for topic in identified_topics])
 
-        knowledge_base_section = ""
-        if self.knowledge_base_content:
-            knowledge_base_section = f"""
-            <knowledge_base_examples>
-            Refer to these example project codes for context and best practices:
-            {self.knowledge_base_content}
-            </knowledge_base_examples>
+        rag_context_section = ""
+        if rag_context:
+            rag_context_section = f"""
+            <relevant_knowledge_base_context>
+            Refer to this context from example projects and best practices:
+            {rag_context}
+            </relevant_knowledge_base_context>
             """
 
         prompt_content = f"""
             Human: You are an expert code reviewer. Based on the provided code changes (diff) and guidelines,
             generate detailed, actionable general comments for the following identified topics.
             These comments should apply to the PR as a whole, not specific lines.
-            {knowledge_base_section}
+            {rag_context_section}
 
             <review_guidelines>
             {guidelines}
@@ -227,22 +215,23 @@ class MCPClient:
             """
         return prompt_content
 
-    def build_security_issue_prompt(self, guidelines: str, diff: str, identified_issues: List[Dict]) -> str:
+    def build_security_issue_prompt(self, guidelines: str, diff: str, identified_issues: List[Dict],
+                                    rag_context: Optional[str]) -> str:
         """
         Prompts the LLM to generate detailed security issues with severity for specific identified issues.
-        Includes optional knowledge base.
+        Includes optional RAG context.
         """
         issues_str = "\n".join(
             [f"- File: {issue['file']}, Line: {issue['line']}, Description: {issue['description']}" for issue in
              identified_issues])
 
-        knowledge_base_section = ""
-        if self.knowledge_base_content:
-            knowledge_base_section = f"""
-            <knowledge_base_examples>
-            Refer to these example project codes for context and best practices:
-            {self.knowledge_base_content}
-            </knowledge_base_examples>
+        rag_context_section = ""
+        if rag_context:
+            rag_context_section = f"""
+            <relevant_knowledge_base_context>
+            Refer to this context from example projects and best practices:
+            {rag_context}
+            </relevant_knowledge_base_context>
             """
 
         prompt_content = f"""
@@ -250,7 +239,7 @@ class MCPClient:
             generate detailed security issues for the following identified potential vulnerabilities.
             Assign a severity level to each issue: "SEVERE", "MODERATE", or "LOW".
             Provide actionable recommendations to mitigate the vulnerability.
-            {knowledge_base_section}
+            {rag_context_section}
 
             <review_guidelines>
             {guidelines}
@@ -325,6 +314,7 @@ class MCPClient:
         all_general_comments = []
         all_security_issues = []
         full_review_text_for_summary = ""
+        rag_context_for_prompts = None
 
         try:
             installation_id = pr_details['installation_id']
@@ -345,9 +335,19 @@ class MCPClient:
             if not guidelines:
                 logger.warning(f"Guidelines content for PR #{pr_id} is empty. Review might be less effective.")
 
+            # --- RAG Step: Retrieve context from Knowledge Base ---
+            # The query for the knowledge base can be the PR diff itself or a summary of it
+            kb_query = f"Code review for pull request changes: {diff_content[:1000]}..."  # Limit query length
+            rag_context_for_prompts = self.rag_utils.retrieve_and_generate_context(kb_query)
+            if rag_context_for_prompts:
+                logger.info(f"Retrieved RAG context for PR #{pr_id}. Length: {len(rag_context_for_prompts)} chars.")
+            else:
+                logger.warning(f"No RAG context retrieved for PR #{pr_id}.")
+
             # --- Step 1: Initial Analysis ---
             logger.info(f"Step 1: Performing initial analysis for PR #{pr_id}.")
-            initial_analysis_prompt = self.build_initial_analysis_prompt(guidelines, diff_content)
+            initial_analysis_prompt = self.build_initial_analysis_prompt(guidelines, diff_content,
+                                                                         rag_context_for_prompts)
             initial_analysis_raw = await self._invoke_bedrock_model(initial_analysis_prompt, max_tokens=2000)
 
             identified_line_comments = []
@@ -374,7 +374,8 @@ class MCPClient:
             # --- Step 2: Generate Detailed Line Comments ---
             if identified_line_comments:
                 logger.info(f"Step 2: Generating detailed line comments for PR #{pr_id}.")
-                line_comment_prompt = self.build_line_comment_prompt(guidelines, diff_content, identified_line_comments)
+                line_comment_prompt = self.build_line_comment_prompt(guidelines, diff_content, identified_line_comments,
+                                                                     rag_context_for_prompts)
                 line_comments_raw = await self._invoke_bedrock_model(line_comment_prompt)
                 if line_comments_raw:
                     try:
@@ -393,7 +394,8 @@ class MCPClient:
             if identified_general_comments:
                 logger.info(f"Step 3: Generating detailed general comments for PR #{pr_id}.")
                 general_comment_prompt = self.build_general_comment_prompt(guidelines, diff_content,
-                                                                           identified_general_comments)
+                                                                           identified_general_comments,
+                                                                           rag_context_for_prompts)
                 general_comments_raw = await self._invoke_bedrock_model(general_comment_prompt)
                 if general_comments_raw:
                     try:
@@ -412,7 +414,8 @@ class MCPClient:
             if identified_security_issues:
                 logger.info(f"Step 4: Generating detailed security issues for PR #{pr_id}.")
                 security_issue_prompt = self.build_security_issue_prompt(guidelines, diff_content,
-                                                                         identified_security_issues)
+                                                                         identified_security_issues,
+                                                                         rag_context_for_prompts)
                 security_issues_raw = await self._invoke_bedrock_model(security_issue_prompt)
                 if security_issues_raw:
                     try:
@@ -460,9 +463,14 @@ class MCPClient:
 
     def check_bedrock_health(self) -> str:
         try:
+            # Check LLM connectivity
             self.bedrock_client.list_foundation_models(maxResults=1)
-            logger.info("Bedrock service health check successful.")
-            return "reachable"
+            # Check Knowledge Base connectivity
+            kb_health = self.rag_utils.check_kb_health()
+            if kb_health == "reachable":
+                return "reachable"
+            else:
+                return f"reachable (LLM), {kb_health} (KB)"
         except Exception as e:
             logger.error(f"Bedrock service health check failed: {e}", exc_info=True)
             return f"unreachable (error: {e})"

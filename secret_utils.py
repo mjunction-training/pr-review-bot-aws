@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 
 import boto3
 from botocore.exceptions import ClientError
@@ -33,23 +34,18 @@ class SecretUtils:
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code")
             if error_code == 'DecryptionFailureException':
-                # Secrets Manager can't decrypt the protected secret text using the provided KMS key.
                 logger.error(f"DecryptionFailureException: The secret can't be decrypted. {e}")
                 raise ValueError(f"Failed to decrypt secret: {e}")
             elif error_code == 'InternalServiceErrorException':
-                # An error occurred on the server side.
                 logger.error(f"InternalServiceErrorException: An internal error occurred. {e}")
                 raise ValueError(f"Internal service error: {e}")
             elif error_code == 'InvalidParameterException':
-                # You provided an invalid value for a parameter.
                 logger.error(f"InvalidParameterException: Invalid parameter provided. {e}")
                 raise ValueError(f"Invalid parameter for secret retrieval: {e}")
             elif error_code == 'InvalidRequestException':
-                # You provided a parameter value that is not valid for the current state of the resource.
                 logger.error(f"InvalidRequestException: Invalid request for secret retrieval. {e}")
                 raise ValueError(f"Invalid request for secret retrieval: {e}")
             elif error_code == 'ResourceNotFoundException':
-                # We can't find the resource that you asked for.
                 logger.error(f"ResourceNotFoundException: Secret '{self.secret_name}' not found. {e}")
                 raise ValueError(f"Secret '{self.secret_name}' not found: {e}")
             else:
@@ -59,8 +55,6 @@ class SecretUtils:
             logger.error(f"An unexpected error occurred during secret retrieval: {e}", exc_info=True)
             raise ValueError(f"Unexpected error retrieving secret: {e}")
         else:
-            # Decrypts secret using the associated KMS key.
-            # Depending on whether the secret is a string or binary, one of these fields will be populated.
             if 'SecretString' in get_secret_value_response:
                 secret = get_secret_value_response['SecretString']
                 try:
@@ -71,8 +65,6 @@ class SecretUtils:
                     logger.error(f"Failed to decode JSON from secret string: {e}. Raw secret: {secret[:100]}...", exc_info=True)
                     raise ValueError(f"Secret is not valid JSON: {e}")
             else:
-                # If the secret is binary, you would handle it here.
-                # For this application, we expect string secrets.
                 logger.error(f"Secret '{self.secret_name}' does not contain 'SecretString'. Binary secrets are not supported.")
                 raise ValueError("Secret does not contain a string value.")
 
@@ -90,6 +82,9 @@ class SecretUtils:
 
     def get_bedrock_model_id(self) -> str:
         """Retrieves Bedrock Model ID from the secret (optional, if stored there)."""
-        # This is optional. If BEDROCK_MODEL_ID is still an env var, this method won't be used.
         return self.get_secret().get("BEDROCK_MODEL_ID")
+
+    def get_bedrock_knowledge_base_id(self) -> Optional[str]:
+        """Retrieves Bedrock Knowledge Base ID from the secret (optional, if stored there)."""
+        return self.get_secret().get("BEDROCK_KNOWLEDGE_BASE_ID")
 

@@ -7,14 +7,10 @@
 
 # --- Configuration Variables ---
 ROLE_NAME="pr-review-bot-lambda-role"
-POLICY_NAME_BEDROCK="pr-review-bot-bedrock-policy"
+POLICY_NAME_BEDROCK_LLM="pr-review-bot-bedrock-llm-policy" # Renamed for clarity
 POLICY_NAME_SECRETS="pr-review-bot-secrets-policy"
-POLICY_NAME_S3_KB="pr-review-bot-s3-kb-policy" # New policy name for S3 Knowledge Base
-# AWS_REGION="us-east-1" # Ensure this matches your Lambda and Bedrock region
-
-# --- S3 Knowledge Base Configuration (for IAM policy) ---
-# This should match the bucket name used in deploy_lambda.sh
-EXAMPLE_PROJECT_S3_BUCKET="your-example-projects-s3-bucket" # !!! IMPORTANT: REPLACE THIS WITH YOUR S3 BUCKET NAME !!!
+POLICY_NAME_BEDROCK_KB="pr-review-bot-bedrock-kb-policy" # New policy name for Bedrock Knowledge Base
+AWS_REGION="us-east-1" # Ensure this matches your Lambda and Bedrock region
 
 
 # --- 1. Create IAM Role for Lambda ---
@@ -52,10 +48,10 @@ aws iam attach-role-policy \
     --role-name "$ROLE_NAME" \
     --policy-arn "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 
-# --- 3. Create Inline Policy for Bedrock Access ---
-echo "--- Creating Inline Policy for Bedrock Access: $POLICY_NAME_BEDROCK ---"
-# Policy to allow invoking Bedrock models
-BEDROCK_POLICY_DOCUMENT='{
+# --- 3. Create Inline Policy for Bedrock LLM Access ---
+echo "--- Creating Inline Policy for Bedrock LLM Access: $POLICY_NAME_BEDROCK_LLM ---"
+# Policy to allow invoking Bedrock foundation models
+BEDROCK_LLM_POLICY_DOCUMENT='{
     "Version": "2012-10-17",
     "Statement": [
         {
@@ -71,10 +67,10 @@ BEDROCK_POLICY_DOCUMENT='{
 
 aws iam put-role-policy \
     --role-name "$ROLE_NAME" \
-    --policy-name "$POLICY_NAME_BEDROCK" \
-    --policy-document "$BEDROCK_POLICY_DOCUMENT"
+    --policy-name "$POLICY_NAME_BEDROCK_LLM" \
+    --policy-document "$BEDROCK_LLM_POLICY_DOCUMENT"
 
-echo "Inline policy '$POLICY_NAME_BEDROCK' attached to role '$ROLE_NAME'."
+echo "Inline policy '$POLICY_NAME_BEDROCK_LLM' attached to role '$ROLE_NAME'."
 
 # --- 4. Create Inline Policy for Secrets Manager Access ---
 echo "--- Creating Inline Policy for Secrets Manager Access: $POLICY_NAME_SECRETS ---"
@@ -100,31 +96,29 @@ aws iam put-role-policy \
 
 echo "Inline policy '$POLICY_NAME_SECRETS' attached to role '$ROLE_NAME'."
 
-# --- 5. Create Inline Policy for S3 Knowledge Base Access ---
-echo "--- Creating Inline Policy for S3 Knowledge Base Access: $POLICY_NAME_S3_KB ---"
-S3_KB_POLICY_DOCUMENT='{
+# --- 5. Create Inline Policy for Bedrock Knowledge Base Access ---
+echo "--- Creating Inline Policy for Bedrock Knowledge Base Access: $POLICY_NAME_BEDROCK_KB ---"
+# Policy to allow interacting with Bedrock Knowledge Bases
+BEDROCK_KB_POLICY_DOCUMENT='{
     "Version": "2012-10-17",
     "Statement": [
         {
             "Effect": "Allow",
             "Action": [
-                "s3:GetObject",
-                "s3:ListBucket"
+                "bedrock:Retrieve",
+                "bedrock:RetrieveAndGenerate"
             ],
-            "Resource": [
-                "arn:aws:s3:::'"$EXAMPLE_PROJECT_S3_BUCKET"'",
-                "arn:aws:s3:::'"$EXAMPLE_PROJECT_S3_BUCKET"'/*"
-            ]
+            "Resource": "arn:aws:bedrock:*:*:knowledge-base/*" # All knowledge bases. Narrow down if possible.
         }
     ]
 }'
 
 aws iam put-role-policy \
     --role-name "$ROLE_NAME" \
-    --policy-name "$POLICY_NAME_S3_KB" \
-    --policy-document "$S3_KB_POLICY_DOCUMENT"
+    --policy-name "$POLICY_NAME_BEDROCK_KB" \
+    --policy-document "$BEDROCK_KB_POLICY_DOCUMENT"
 
-echo "Inline policy '$POLICY_NAME_S3_KB' attached to role '$ROLE_NAME'."
+echo "Inline policy '$POLICY_NAME_BEDROCK_KB' attached to role '$ROLE_NAME'."
 
 
 echo "IAM Role and policies setup finished."

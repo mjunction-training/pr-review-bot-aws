@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: AWS CloudFormation template for GitHub PR Review Bot Lambda with Bedrock, Secrets Manager, and S3 Knowledge Base.
+Description: AWS CloudFormation template for GitHub PR Review Bot Lambda with Bedrock, Secrets Manager, and Bedrock Knowledge Base (RAG).
 
 Parameters:
   # --- Lambda Configuration ---
@@ -50,26 +50,23 @@ Parameters:
     Default: ai-review-bots
     Description: The slug of the GitHub team that triggers reviews.
 
-  # --- Bedrock Configuration ---
+  # --- Bedrock Configuration (LLM Model ID can be in Secrets Manager) ---
   BedrockModelId:
     Type: String
     Default: anthropic.claude-3-sonnet-20240229-v1:0
-    Description: The AWS Bedrock model ID to use for reviews.
+    Description: The AWS Bedrock model ID to use for reviews. This can also be stored in Secrets Manager.
 
   # --- Secrets Manager Configuration ---
   SecretsManagerSecretName:
     Type: String
     Default: github/pr-review-bot-secrets
-    Description: Name for the Secrets Manager secret storing GitHub credentials.
+    Description: Name for the Secrets Manager secret storing GitHub credentials and optionally Bedrock IDs.
 
-  # --- S3 Knowledge Base Configuration ---
-  ExampleProjectS3Bucket:
+  # --- Bedrock Knowledge Base Configuration ---
+  BedrockKnowledgeBaseId:
     Type: String
-    Description: S3 bucket name where example projects for the knowledge base are stored.
-  ExampleProjectS3Prefix:
-    Type: String
-    Default: "" # Optional: S3 prefix (folder) within the bucket where example project files are located.
-    Description: S3 prefix (folder) within the bucket where example project files are located (e.g., 'my-project-kb/').
+    Default: "" # Optional: If the KB ID is managed via environment variable instead of Secrets Manager
+    Description: The ID of the AWS Bedrock Knowledge Base to use for RAG. Can be empty if stored in Secrets Manager.
 
 Resources:
   # --- IAM Role for Lambda Function ---
@@ -87,7 +84,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole # For CloudWatch Logs
       Policies:
-        - PolicyName: BedrockAccessPolicy
+        - PolicyName: BedrockLLMAccessPolicy # Renamed
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -104,30 +101,29 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsManagerSecretName}-*
-        - PolicyName: S3KnowledgeBaseAccessPolicy # New policy for S3
+        - PolicyName: BedrockKnowledgeBaseAccessPolicy # New policy for Bedrock KB
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
-                  - s3:GetObject
-                  - s3:ListBucket
-                Resource:
-                  - !Sub arn:aws:s3:::${ExampleProjectS3Bucket}
-                  - !Sub arn:aws:s3:::${ExampleProjectS3Bucket}/*
+                  - bedrock:Retrieve
+                  - bedrock:RetrieveAndGenerate
+                Resource: !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/* # All knowledge bases. Narrow down if possible.
 
   # --- Secrets Manager Secret ---
   GitHubAppSecrets:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Ref SecretsManagerSecretName
-      Description: Stores GitHub App credentials for the PR Review Bot.
+      Description: Stores GitHub App credentials and optional Bedrock IDs for the PR Review Bot.
       SecretString: !Sub |
         {
           "GITHUB_APP_ID": "${GitHubAppId}",
           "GITHUB_PRIVATE_KEY": "${GitHubPrivateKey}",
           "GITHUB_WEBHOOK_SECRET": "${GitHubWebhookSecret}",
-          "BEDROCK_MODEL_ID": "${BedrockModelId}"
+          "BEDROCK_MODEL_ID": "${BedrockModelId}",
+          "BEDROCK_KNOWLEDGE_BASE_ID": "${BedrockKnowledgeBaseId}" # Added to secret
         }
 
   # --- Lambda Function ---
@@ -140,7 +136,7 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: !Ref LambdaTimeout
       MemorySize: !Ref LambdaMemory
-      Description: GitHub PR Review Bot powered by AWS Bedrock and Secrets Manager (with S3 Knowledge Base).
+      Description: GitHub PR Review Bot powered by AWS Bedrock (RAG Knowledge Base enabled).
       Code:
         ZipFile: |
           # Placeholder for code. This will be replaced by the packaged ZIP file during deployment.
@@ -150,8 +146,7 @@ Resources:
           TRIGGER_TEAM_SLUG: !Ref TriggerTeamSlug
           AWS_REGION: !Ref "AWS::Region"
           SECRETS_MANAGER_SECRET_NAME: !Ref SecretsManagerSecretName
-          EXAMPLE_PROJECT_S3_BUCKET: !Ref ExampleProjectS3Bucket # New env var
-          EXAMPLE_PROJECT_S3_PREFIX: !Ref ExampleProjectS3Prefix # New env var
+          BEDROCK_KNOWLEDGE_BASE_ID: !Ref BedrockKnowledgeBaseId # Passed as env var, can be empty if in secret
 
   # --- API Gateway ---
   ApiGatewayRestApi:

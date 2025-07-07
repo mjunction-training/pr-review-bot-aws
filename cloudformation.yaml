@@ -1,0 +1,264 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS CloudFormation template for GitHub PR Review Bot Lambda with Bedrock, Secrets Manager, and S3 Knowledge Base.
+
+Parameters:
+  # --- Lambda Configuration ---
+  LambdaFunctionName:
+    Type: String
+    Default: pr-review-bot-lambda
+    Description: Name for the Lambda function.
+  LambdaRuntime:
+    Type: String
+    Default: python3.9
+    Description: Python runtime for the Lambda function.
+    AllowedValues:
+      - python3.9
+      - python3.10
+      - python3.11
+  LambdaTimeout:
+    Type: Number
+    Default: 600
+    Description: Lambda function timeout in seconds (max 900).
+  LambdaMemory:
+    Type: Number
+    Default: 512
+    Description: Lambda function memory in MB.
+  LogLevel:
+    Type: String
+    Default: INFO
+    Description: Logging level for the Lambda function.
+    AllowedValues:
+      - DEBUG
+      - INFO
+      - WARNING
+      - ERROR
+
+  # --- GitHub App & Bot Configuration ---
+  GitHubAppId:
+    Type: String
+    Description: Your GitHub App ID.
+  GitHubPrivateKey:
+    Type: String
+    Description: Your GitHub App Private Key (full content including BEGIN/END lines).
+    NoEcho: true # Prevents the value from being displayed in CloudFormation console
+  GitHubWebhookSecret:
+    Type: String
+    Description: Your GitHub App Webhook Secret.
+    NoEcho: true
+  TriggerTeamSlug:
+    Type: String
+    Default: ai-review-bots
+    Description: The slug of the GitHub team that triggers reviews.
+
+  # --- Bedrock Configuration ---
+  BedrockModelId:
+    Type: String
+    Default: anthropic.claude-3-sonnet-20240229-v1:0
+    Description: The AWS Bedrock model ID to use for reviews.
+
+  # --- Secrets Manager Configuration ---
+  SecretsManagerSecretName:
+    Type: String
+    Default: github/pr-review-bot-secrets
+    Description: Name for the Secrets Manager secret storing GitHub credentials.
+
+  # --- S3 Knowledge Base Configuration ---
+  ExampleProjectS3Bucket:
+    Type: String
+    Description: S3 bucket name where example projects for the knowledge base are stored.
+  ExampleProjectS3Prefix:
+    Type: String
+    Default: "" # Optional: S3 prefix (folder) within the bucket where example project files are located.
+    Description: S3 prefix (folder) within the bucket where example project files are located (e.g., 'my-project-kb/').
+
+Resources:
+  # --- IAM Role for Lambda Function ---
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${LambdaFunctionName}-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole # For CloudWatch Logs
+      Policies:
+        - PolicyName: BedrockAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:ListFoundationModels
+                Resource: "*"
+        - PolicyName: SecretsManagerAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsManagerSecretName}-*
+        - PolicyName: S3KnowledgeBaseAccessPolicy # New policy for S3
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${ExampleProjectS3Bucket}
+                  - !Sub arn:aws:s3:::${ExampleProjectS3Bucket}/*
+
+  # --- Secrets Manager Secret ---
+  GitHubAppSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Ref SecretsManagerSecretName
+      Description: Stores GitHub App credentials for the PR Review Bot.
+      SecretString: !Sub |
+        {
+          "GITHUB_APP_ID": "${GitHubAppId}",
+          "GITHUB_PRIVATE_KEY": "${GitHubPrivateKey}",
+          "GITHUB_WEBHOOK_SECRET": "${GitHubWebhookSecret}",
+          "BEDROCK_MODEL_ID": "${BedrockModelId}"
+        }
+
+  # --- Lambda Function ---
+  PRReviewBotLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Handler: lambda_function.lambda_handler
+      Runtime: !Ref LambdaRuntime
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemory
+      Description: GitHub PR Review Bot powered by AWS Bedrock and Secrets Manager (with S3 Knowledge Base).
+      Code:
+        ZipFile: |
+          # Placeholder for code. This will be replaced by the packaged ZIP file during deployment.
+      Environment:
+        Variables:
+          LOG_LEVEL: !Ref LogLevel
+          TRIGGER_TEAM_SLUG: !Ref TriggerTeamSlug
+          AWS_REGION: !Ref "AWS::Region"
+          SECRETS_MANAGER_SECRET_NAME: !Ref SecretsManagerSecretName
+          EXAMPLE_PROJECT_S3_BUCKET: !Ref ExampleProjectS3Bucket # New env var
+          EXAMPLE_PROJECT_S3_PREFIX: !Ref ExampleProjectS3Prefix # New env var
+
+  # --- API Gateway ---
+  ApiGatewayRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub ${LambdaFunctionName}-api
+      Description: API Gateway for GitHub PR Review Bot Lambda.
+
+  ApiGatewayRootResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      PathPart: "/"
+      RestApiId: !Ref ApiGatewayRestApi
+
+  ApiGatewayWebhookResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      PathPart: "webhook"
+      RestApiId: !Ref ApiGatewayRestApi
+
+  ApiGatewayWebhookMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      HttpMethod: POST
+      ResourceId: !Ref ApiGatewayWebhookResource
+      RestApiId: !Ref ApiGatewayRestApi
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt PRReviewBotLambda.Arn
+
+  ApiGatewayHealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      PathPart: "health"
+      RestApiId: !Ref ApiGatewayRestApi
+
+  ApiGatewayHealthMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      HttpMethod: GET
+      ResourceId: !Ref ApiGatewayHealthResource
+      RestApiId: !Ref ApiGatewayRestApi
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt PRReviewBotLambda.Arn
+
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ApiGatewayWebhookMethod
+      - ApiGatewayHealthMethod
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      Description: Initial deployment
+
+  ApiGatewayStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: prod
+      RestApiId: !Ref ApiGatewayRestApi
+      DeploymentId: !Ref ApiGatewayDeployment
+
+  # --- Permissions ---
+  LambdaPermissionApiGatewayWebhook:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt PRReviewBotLambda.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/*/*${ApiGatewayWebhookResource.PathPart}
+
+  LambdaPermissionApiGatewayHealth:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt PRReviewBotLambda.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/*/*${ApiGatewayHealthResource.PathPart}
+
+Outputs:
+  WebhookUrl:
+    Description: URL for the GitHub Webhook endpoint
+    Value: !Sub https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/webhook
+    Export:
+      Name: !Sub ${AWS::StackName}-WebhookUrl
+  HealthCheckUrl:
+    Description: URL for the Health Check endpoint
+    Value: !Sub https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/health
+    Export:
+      Name: !Sub ${AWS::StackName}-HealthCheckUrl
+  LambdaFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref PRReviewBotLambda
+  LambdaRoleArn:
+    Description: ARN of the Lambda execution role
+    Value: !GetAtt LambdaExecutionRole.Arn
+  SecretsManagerSecretArn:
+    Description: ARN of the Secrets Manager secret
+    Value: !Ref GitHubAppSecrets

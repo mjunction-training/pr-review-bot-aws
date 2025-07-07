@@ -6,9 +6,14 @@ This project implements a GitHub Pull Request (PR) review bot that leverages AWS
 
 * **Automated PR Reviews**: Automatically reviews pull requests when they are opened, reopened, synchronized, or a review is requested for a specific team.  
 * **Bedrock Integration**: Utilizes AWS Bedrock's Claude Sonnet model for comprehensive code analysis and review generation.  
-* **Structured Output**: Provides a summary, line-specific comments, and identified security issues directly in GitHub PR comments.  
+* **Detailed & Structured Output**: Provides a comprehensive review including:  
+  * Overall PR summary.  
+  * Line-specific comments (for precise feedback).  
+  * General PR comments (for broader architectural or process feedback).  
+  * Categorized security vulnerabilities (SEVERE, MODERATE, LOW).  
 * **Secure Secret Management**: Retrieves sensitive credentials (GitHub App private key, webhook secret) from AWS Secrets Manager, enhancing security.  
-* **Configurable**: Easy to configure GitHub App details, webhook secrets, and the target team for reviews via environment variables and Secrets Manager.  
+* **S3 Knowledge Base**: Can leverage example projects stored in an S3 bucket as a knowledge base to provide more informed and context-aware reviews.  
+* **Configurable**: Easy to configure GitHub App details, webhook secrets, the target team for reviews, and S3 knowledge base settings via environment variables and Secrets Manager.  
 * **Serverless Deployment**: Deploys as an AWS Lambda function, triggered by AWS API Gateway, offering scalability and cost-effectiveness.  
 * **Multiple Deployment Options**: Supports deployment via shell scripts, AWS CloudFormation, and Terraform.
 
@@ -19,16 +24,21 @@ This project implements a GitHub Pull Request (PR) review bot that leverages AWS
 3. **AWS Lambda**:  
    * The lambda\_function.py serves as the entry point.  
    * It initializes SecretUtils to securely retrieve credentials from AWS Secrets Manager.  
-   * It then initializes GitHubUtils (using secrets from SecretUtils) to interact with the GitHub API (fetching diffs, posting comments) and MCPClient (which now directly interfaces with AWS Bedrock, potentially using model IDs from secrets).  
+   * It initializes S3Utils to read example projects from an S3 bucket, forming a knowledge base.  
+   * It then initializes GitHubUtils (using secrets from SecretUtils) to interact with the GitHub API (fetching diffs, posting comments) and MCPClient (which now directly interfaces with AWS Bedrock).  
    * It processes the GitHub webhook payload.  
    * If the PR is relevant and a review is requested for the configured team, it fetches the PR diff.  
-   * It constructs a detailed prompt using the diff and predefined guidelines.md.  
-   * It invokes the specified AWS Bedrock model (e.g., Claude Sonnet) to generate the code review.  
-   * It then invokes Bedrock again to summarize the review.  
+   * **Multi-Step LLM Interaction**: The MCPClient performs a series of calls to AWS Bedrock:  
+     1. **Initial Analysis**: An initial prompt asks the LLM to identify potential areas for line comments, general comments, and security issues based on the diff and comprehensive guidelines. This prompt *includes the S3 knowledge base* for enhanced context.  
+     2. **Detailed Line Comments**: A separate prompt is sent to generate detailed, actionable comments for identified specific lines of code.  
+     3. **Detailed General Comments**: Another prompt generates broader comments relevant to the entire PR.  
+     4. **Detailed Security Issues**: A dedicated prompt focuses on identified security vulnerabilities, assigning a severity (SEVERE, MODERATE, LOW).  
+     5. **Summary Generation**: Finally, all generated comments and issues are combined, and a summary prompt creates a concise overview.  
    * Finally, it uses GitHubUtils to post the review summary, comments, and security issues back to the GitHub PR.  
 4. **AWS Bedrock**: Provides the large language model capabilities (Claude Sonnet) for generating the code review and summary.  
 5. **AWS Secrets Manager**: Securely stores sensitive credentials like the GitHub App private key and webhook secret.  
-6. **AWS IAM**: Manages permissions for the Lambda function to interact with Bedrock, Secrets Manager, and CloudWatch Logs.
+6. **AWS S3**: Stores example projects which can be used as a knowledge base for the LLM.  
+7. **AWS IAM**: Manages permissions for the Lambda function to interact with Bedrock, Secrets Manager, S3, and CloudWatch Logs.
 
 ## **Prerequisites**
 
@@ -49,22 +59,24 @@ Before deploying, ensure you have:
   * **Webhook**: Enable webhooks and set the webhook secret.  
   * **Subscribe to events**: Pull requests.  
   * Generate a **private key** and download it (.pem file).  
-  * Note down your **App ID**.
+  * Note down your **App ID**.  
+* **S3 Bucket for Knowledge Base**: An S3 bucket where you will store your example projects. Ensure the project files are organized under a specific prefix (e.g., my-example-projects/project-a/).
 
 ## **Project Structure**
 
 * app.py: (Original Flask app, now mostly superseded by lambda\_function.py for Lambda deployment, but contains core logic for webhook handling that lambda\_function.py adapts).  
 * github\_utils.py: Handles GitHub API interactions, including webhook validation, fetching diffs, and posting comments.  
-* mcp\_client.py: **(Modified)** Now directly integrates with AWS Bedrock to invoke LLMs for review generation and summarization.  
+* mcp\_client.py: **(Modified)** Now directly integrates with AWS Bedrock to invoke LLMs for review generation and summarization, using a multi-step prompting approach and optionally leveraging an S3 knowledge base.  
 * lambda\_function.py: **(New)** The AWS Lambda handler, adapting the webhook logic for the Lambda environment.  
-* guidelines.md: Contains the code review guidelines provided to the LLM.  
+* guidelines.md: **(Updated)** Contains comprehensive code review guidelines.  
 * requirements.txt: Lists Python dependencies.  
 * secret\_utils.py: **(New)** Utility for securely retrieving secrets from AWS Secrets Manager.  
+* s3\_utils.py: **(New)** Utility for reading files from an S3 bucket to form a knowledge base.  
 * deploy\_lambda.sh: Script to package and deploy the Lambda function (shell-script based deployment).  
 * create\_api\_gateway.sh: Script to set up the API Gateway endpoint (shell-script based deployment).  
 * create\_iam\_role.sh: Script to create the necessary IAM role for the Lambda function (shell-script based deployment).  
-* cloudformation.yaml: **(New)** AWS CloudFormation template for deploying the entire stack.  
-* terraform/: **(New Directory)** Contains Terraform configuration files.  
+* cloudformation.yaml: AWS CloudFormation template for deploying the entire stack.  
+* terraform/: Contains Terraform configuration files.  
   * terraform/main.tf: Main Terraform configuration.  
   * terraform/variables.tf: Terraform input variables.  
   * terraform/outputs.tf: Terraform output values.  
@@ -119,11 +131,13 @@ SECRETS\_MANAGER\_SECRET\_NAME="github/pr-review-bot-secrets" \# The name of the
 TRIGGER\_TEAM\_SLUG="ai-review-bots" \# The slug of the GitHub team that triggers reviews (e.g., 'ai-review-bots')  
 AWS\_REGION="us-east-1" \# Your desired AWS region for Lambda and Bedrock (must match region of your secret)  
 BEDROCK\_MODEL\_ID="anthropic.claude-3-sonnet-20240229-v1:0" \# Optional: Only needed if not stored in Secrets Manager  
+EXAMPLE\_PROJECT\_S3\_BUCKET="your-example-projects-s3-bucket" \# S3 bucket for knowledge base  
+EXAMPLE\_PROJECT\_S3\_PREFIX="example-project-1/" \# S3 prefix (folder) for the specific example project  
 LOG\_LEVEL="INFO" \# Logging level: DEBUG, INFO, WARNING, ERROR
 
 #### **4\. Create IAM Role for Lambda**
 
-This step creates an IAM role that your Lambda function will assume. This role grants the necessary permissions to execute, write logs to CloudWatch, invoke Bedrock models, and **retrieve secrets from Secrets Manager**.
+This step creates an IAM role that your Lambda function will assume. This role grants the necessary permissions to execute, write logs to CloudWatch, invoke Bedrock models, and **retrieve** secrets from Secrets Manager and read from **S3**.
 
 1. **Make the script executable**:  
    chmod \+x create\_iam\_role.sh
@@ -141,6 +155,7 @@ This step packages your Python code and its dependencies into a ZIP file and dep
    * Open deploy\_lambda.sh in a text editor.  
    * **Replace LAMBDA\_ROLE\_ARN**: Paste the IAM Role ARN you copied from the previous step.  
    * **Replace SECRETS\_MANAGER\_SECRET\_NAME**: Ensure this matches the name you used when creating the secret in AWS Secrets Manager.  
+   * **Replace S3 Knowledge Base Variables**: Update EXAMPLE\_PROJECT\_S3\_BUCKET and EXAMPLE\_PROJECT\_S3\_PREFIX with your actual values.  
    * **Verify Region**: Ensure AWS\_REGION matches your desired region.  
    * **Note**: GITHUB\_APP\_ID, GITHUB\_PRIVATE\_KEY, and GITHUB\_WEBHOOK\_SECRET are now read from Secrets Manager, so they are removed from the explicit environment variable list in this script.  
 2. **Make the script executable**:  
@@ -164,7 +179,7 @@ This step sets up an AWS API Gateway REST API that will serve as the public endp
 3. **Run the script**:  
    ./create\_api\_gateway.sh
 
-4. **Output**: The script will output your API Gateway **Webhook URL** (e.g., https://\<api-id\>.execute-api.\<region\>.amazonaws.com/\<stage\>/webhook) and \*\*Health Check URL\`. **Copy the Webhook URL**, as you will need it for configuring GitHub.
+4. **Output**: The script will output your API Gateway **Webhook URL** (e.g., https://\<api-id\>.execute-api.\<region\>.amazonaws.com/\<stage\>/webhook) and **Health Check URL**. **Copy the Webhook URL**, as you will need it for configuring GitHub.
 
 #### **7\. Configure GitHub Webhook**
 
@@ -204,7 +219,8 @@ cp lambda\_function.py package/
 cp github\_utils.py package/  
 cp mcp\_client.py package/  
 cp guidelines.md package/  
-cp secret\_utils.py package/
+cp secret\_utils.py package/  
+cp s3\_utils.py package/ \# Copy the new s3\_utils.py
 
 \# Create the final deployment ZIP file  
 (cd package && zip \-r ../pr\_review\_bot.zip .)
@@ -239,6 +255,8 @@ rm \-rf package/
            BedrockModelId="anthropic.claude-3-sonnet-20240229-v1:0" \\  
            TriggerTeamSlug="ai-review-bots" \\  
            LogLevel="INFO" \\  
+           ExampleProjectS3Bucket="your-example-projects-s3-bucket" \\  
+           ExampleProjectS3Prefix="example-project-1/" \\  
        \--region YOUR\_AWS\_REGION
 
    * **IMPORTANT**: Replace all YOUR\_... placeholders with your actual values. Ensure GitHubPrivateKey has actual newlines.  
@@ -283,7 +301,8 @@ cp lambda\_function.py package/
 cp github\_utils.py package/  
 cp mcp\_client.py package/  
 cp guidelines.md package/  
-cp secret\_utils.py package/
+cp secret\_utils.py package/  
+cp s3\_utils.py package/ \# Copy the new s3\_utils.py
 
 \# Create the final deployment ZIP file in the 'terraform' directory  
 (cd package && zip \-r ../terraform/pr\_review\_bot.zip .)
@@ -306,6 +325,8 @@ rm \-rf package/
    github\_app\_id \= "YOUR\_GITHUB\_APP\_ID"  
    github\_private\_key \= "-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----\\n"  
    github\_webhook\_secret \= "YOUR\_GITHUB\_WEBHOOK\_SECRET"  
+   example\_project\_s3\_bucket \= "your-example-projects-s3-bucket"  
+   example\_project\_s3\_prefix \= "example-project-1/"  
    \# Other variables can be set here or left to their defaults in variables.tf  
    \# bedrock\_model\_id \= "anthropic.claude-3-sonnet-20240229-v1:0"
 
@@ -339,3 +360,7 @@ Follow **Step 7** from the "Shell Scripts (Manual Steps)" section, using the Web
 5. **Observe PR Comments**: Check the comments section of your pull request on GitHub. You should see the automated review summary, general comments, and security issues posted by the bot.
 
 ## **Troubleshooting**
+
+* **Lambda Timeout**: If your reviews are large, the Lambda function might time out. Increase the TIMEOUT variable in deploy\_lambda.sh or LambdaTimeout parameter in CloudFormation/Terraform.  
+* **Lambda Memory**: If the function runs out of memory, increase the MEMORY variable in deploy\_lambda.sh or LambdaMemory parameter in CloudFormation/Terraform.  
+* **Permissions Errors**: Check your Lambda execution role'

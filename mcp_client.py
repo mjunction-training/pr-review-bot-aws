@@ -8,7 +8,7 @@ from pydantic import BaseModel, ValidationError
 
 from github_utils import GitHubUtils
 from secret_utils import SecretUtils
-from rag_utils import RAGUtils  # Import RAGUtils
+from rag_utils import RAGUtils
 
 logger = logging.getLogger(__name__)
 

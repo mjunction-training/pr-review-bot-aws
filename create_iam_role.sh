@@ -8,8 +8,14 @@
 # --- Configuration Variables ---
 ROLE_NAME="pr-review-bot-lambda-role"
 POLICY_NAME_BEDROCK="pr-review-bot-bedrock-policy"
-POLICY_NAME_SECRETS="pr-review-bot-secrets-policy" # New policy name for Secrets Manager
-AWS_REGION="us-east-1" # Ensure this matches your Lambda and Bedrock region
+POLICY_NAME_SECRETS="pr-review-bot-secrets-policy"
+POLICY_NAME_S3_KB="pr-review-bot-s3-kb-policy" # New policy name for S3 Knowledge Base
+# AWS_REGION="us-east-1" # Ensure this matches your Lambda and Bedrock region
+
+# --- S3 Knowledge Base Configuration (for IAM policy) ---
+# This should match the bucket name used in deploy_lambda.sh
+EXAMPLE_PROJECT_S3_BUCKET="your-example-projects-s3-bucket" # !!! IMPORTANT: REPLACE THIS WITH YOUR S3 BUCKET NAME !!!
+
 
 # --- 1. Create IAM Role for Lambda ---
 echo "--- Creating IAM Role: $ROLE_NAME ---"
@@ -93,6 +99,32 @@ aws iam put-role-policy \
     --policy-document "$SECRETS_POLICY_DOCUMENT"
 
 echo "Inline policy '$POLICY_NAME_SECRETS' attached to role '$ROLE_NAME'."
+
+# --- 5. Create Inline Policy for S3 Knowledge Base Access ---
+echo "--- Creating Inline Policy for S3 Knowledge Base Access: $POLICY_NAME_S3_KB ---"
+S3_KB_POLICY_DOCUMENT='{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:ListBucket"
+            ],
+            "Resource": [
+                "arn:aws:s3:::'"$EXAMPLE_PROJECT_S3_BUCKET"'",
+                "arn:aws:s3:::'"$EXAMPLE_PROJECT_S3_BUCKET"'/*"
+            ]
+        }
+    ]
+}'
+
+aws iam put-role-policy \
+    --role-name "$ROLE_NAME" \
+    --policy-name "$POLICY_NAME_S3_KB" \
+    --policy-document "$S3_KB_POLICY_DOCUMENT"
+
+echo "Inline policy '$POLICY_NAME_S3_KB' attached to role '$ROLE_NAME'."
 
 
 echo "IAM Role and policies setup finished."

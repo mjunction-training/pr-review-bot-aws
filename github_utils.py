@@ -147,8 +147,9 @@ class GitHubUtils:
             logger.error(f"Failed to fetch diff from {diff_url}: {str(e)}", exc_info=True)
             raise
 
-    def add_pr_review_comments(self, repo_full_name: str, pr_number: int, summary: str, comments: list,
-                               security_issues: list, installation_id: int):
+    def add_pr_review_comments(self, repo_full_name: str, pr_number: int, summary: str,
+                               line_comments: list, general_comments: list, security_issues: list,
+                               installation_id: int):
         pull_request = None
         try:
             logger.info(f"Attempting to add review comments for PR #{pr_number} in {repo_full_name}.")
@@ -157,56 +158,59 @@ class GitHubUtils:
             repo = github_client.get_repo(repo_full_name)
             pull_request = repo.get_pull(pr_number)
 
-            body = f"## PR Review by CodeGuardian ､暴n\n### PR Review Summary 笨ｨ\n\n{summary}\n\n"
+            # --- Construct the main PR comment body ---
+            body = f"## PR Review by CodeGuardian 🛡️\n\n### PR Review Summary 📝\n\n{summary}\n\n"
+
             if security_issues:
-                body += "### Security Issues 白\n"
-                for issue in security_issues:
-                    body += f"- **{issue['file']}:L{issue['line']}**: {issue['issue']}\n"
+                body += "### Security Issues 🚨\n"
+                # Sort security issues by severity
+                severity_order = {"SEVERE": 3, "MODERATE": 2, "LOW": 1}
+                sorted_security_issues = sorted(security_issues, key=lambda x: severity_order.get(x.severity.upper(), 0), reverse=True)
+
+                for issue in sorted_security_issues:
+                    severity_emoji = {
+                        "SEVERE": "🔴",
+                        "MODERATE": "🟠",
+                        "LOW": "🟡"
+                    }.get(issue.severity.upper(), "⚪")
+                    body += f"- {severity_emoji} **{issue.file}:L{issue.line}** ({issue.severity.upper()}): {issue.issue}\n"
                 body += "\n"
 
-            if comments:
-                body += "### General Comments 町\n"
-                for comment_data in comments:
-                    body += f"- **{comment_data['file']}:L{comment_data['line']}**: {comment_data['comment']}\n"
+            if general_comments:
+                body += "### General Comments 💬\n"
+                for comment_data in general_comments:
+                    body += f"- {comment_data.comment}\n"
                 body += "\n"
 
-            if not summary and not security_issues and not comments:
+            if line_comments:
+                body += "### Line-Specific Comments 📄\n"
+                # Group line comments by file for better readability
+                comments_by_file = {}
+                for lc in line_comments:
+                    if lc.file not in comments_by_file:
+                        comments_by_file[lc.file] = []
+                    comments_by_file[lc.file].append(lc)
+
+                for file, comments_list in comments_by_file.items():
+                    body += f"**File: `{file}`**\n"
+                    # Sort comments within a file by line number
+                    sorted_comments_list = sorted(comments_list, key=lambda x: x.line)
+                    for lc in sorted_comments_list:
+                        body += f"  - Line {lc.line}: {lc.comment}\n"
+                body += "\n"
+
+            if not summary and not security_issues and not general_comments and not line_comments:
                 body += "No specific issues or comments found, but the review process was completed."
 
             pull_request.create_issue_comment(body)
             logger.info(f"Posted main review summary comment for PR #{pr_number}.")
-
-            if comments or security_issues:
-                for comment_data in comments:
-                    try:
-                        pull_request.create_issue_comment(
-                            f"剥 File `{comment_data['file']}`, Line {comment_data['line']}:\n{comment_data['comment']}"
-                        )
-                        logger.debug(f"Posted line comment for {comment_data['file']}:L{comment_data['line']}.")
-                    except Exception as e:
-                        logger.warning(
-                            f"Could not post line comment for {comment_data['file']}:L{comment_data['line']}: {e}")
-
-                for issue_data in security_issues:
-                    try:
-                        pull_request.create_issue_comment(
-                            f"圷 SECURITY ISSUE in `{issue_data['file']}` at line {issue_data['line']}: {issue_data['issue']}"
-                        )
-                        logger.debug(f"Posted security line comment for {issue_data['file']}:L{issue_data['line']}.")
-                    except Exception as e:
-                        logger.warning(
-                            f"Could not post security line comment for {issue_data['file']}:L{issue_data['line']}: {e}")
-            else:
-                logger.info("No line comments to post.")
-
-            logger.info(f"Finished adding review comments for PR #{pr_number}.")
 
         except Exception as e:
             logger.error(f"Failed to add PR review comments for {repo_full_name} PR #{pr_number}: {e}", exc_info=True)
             if pull_request:
                 try:
                     pull_request.create_issue_comment(
-                        f"## PR Review Commenting Failed 笶圭n\n"
+                        f"## PR Review Commenting Failed ❌\n\n"
                         f"An error occurred while posting review comments: `{e}`\n"
                         f"Please check the application logs for more details."
                     )

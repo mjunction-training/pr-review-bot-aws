@@ -5,7 +5,8 @@ import asyncio
 
 from github_utils import GitHubUtils
 from mcp_client import MCPClient
-from secret_utils import SecretUtils # Import SecretUtils
+from secret_utils import SecretUtils
+from s3_utils import S3Utils
 
 # Configure logging
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -19,13 +20,15 @@ logger.setLevel(numeric_log_level)
 logger.info(f"Lambda function initializing with log level: {log_level}")
 
 # Global initialization for cold starts
-# Retrieve the secret name and region from environment variables
 SECRETS_MANAGER_SECRET_NAME = os.getenv('SECRETS_MANAGER_SECRET_NAME')
-AWS_REGION = os.getenv('AWS_REGION', 'us-east-1') # AWS_REGION is still an env var for SecretUtils init
+AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
+EXAMPLE_PROJECT_S3_BUCKET = os.getenv('EXAMPLE_PROJECT_S3_BUCKET') # New env var
+EXAMPLE_PROJECT_S3_PREFIX = os.getenv('EXAMPLE_PROJECT_S3_PREFIX', '') # New env var
 
 github_utils = None
 mcp_client = None
-secret_utils = None # Initialize secret_utils globally
+secret_utils = None
+s3_utils = None # Initialize s3_utils globally
 
 try:
     if not SECRETS_MANAGER_SECRET_NAME:
@@ -34,11 +37,19 @@ try:
     secret_utils = SecretUtils(secret_name=SECRETS_MANAGER_SECRET_NAME, region_name=AWS_REGION)
     logger.info("SecretUtils initialized successfully.")
 
+    # Initialize S3Utils
+    if EXAMPLE_PROJECT_S3_BUCKET:
+        s3_utils = S3Utils(bucket_name=EXAMPLE_PROJECT_S3_BUCKET, region_name=AWS_REGION)
+        logger.info("S3Utils initialized successfully.")
+    else:
+        logger.warning("EXAMPLE_PROJECT_S3_BUCKET not set. S3 knowledge base will not be available.")
+
     github_utils = GitHubUtils(secret_utils=secret_utils)
     logger.info("GitHubUtils initialized successfully using secrets.")
 
-    mcp_client = MCPClient(github_utils=github_utils, secret_utils=secret_utils)
-    logger.info("MCPClient (Bedrock integration) initialized successfully using secrets.")
+    # Pass s3_utils to MCPClient
+    mcp_client = MCPClient(github_utils=github_utils, secret_utils=secret_utils, s3_utils=s3_utils)
+    logger.info("MCPClient (Bedrock integration) initialized successfully using secrets and S3Utils.")
 
 except ValueError as e:
     logger.error(f"Failed to initialize core utilities: {e}. This will cause Lambda errors.", exc_info=True)
@@ -46,7 +57,7 @@ except Exception as e:
     logger.error(f"An unexpected error occurred during global initialization: {e}. This will cause Lambda errors.", exc_info=True)
 
 
-def lambda_handler(event, context: object):
+def lambda_handler(event, context):
     logger.debug(f"Received Lambda event: {json.dumps(event)}")
 
     # Health check endpoint
@@ -72,6 +83,15 @@ def lambda_handler(event, context: object):
         else:
             status["services"]["bedrock_connection"] = "not_initialized"
             logger.warning("MCPClient (Bedrock integration) not initialized, Bedrock connection health not checked.")
+
+        if s3_utils:
+            # A simple check for S3Utils initialization
+            status["services"]["s3_knowledge_base"] = "initialized" if s3_utils else "not_initialized"
+            logger.debug(f"S3 Knowledge Base status: {status['services']['s3_knowledge_base']}")
+        else:
+            status["services"]["s3_knowledge_base"] = "not_configured"
+            logger.warning("S3Utils not configured, S3 knowledge base not checked.")
+
 
         overall_status = "ok"
         for service_name, service_status in status["services"].items():
@@ -180,13 +200,17 @@ def lambda_handler(event, context: object):
             if review_output:
                 logger.info(f"Received review output from Bedrock for PR #{pr_details['pr_id']}.")
                 logger.debug(
-                    f"Review Output: Summary='{review_output.summary[:100]}...' Comments={len(review_output.comments)} Security Issues={len(review_output.security_issues)}")
+                    f"Review Output: Summary='{review_output.summary[:100]}...' "
+                    f"Line Comments={len(review_output.line_comments)} "
+                    f"General Comments={len(review_output.general_comments)} "
+                    f"Security Issues={len(review_output.security_issues)}")
                 try:
                     github_utils.add_pr_review_comments(
                         repo_full_name=f"{pr_details['repo_owner']}/{pr_details['repo_name']}",
                         pr_number=pr_details['pr_id'],
                         summary=review_output.summary,
-                        comments=review_output.comments,
+                        line_comments=review_output.line_comments,
+                        general_comments=review_output.general_comments,
                         security_issues=review_output.security_issues,
                         installation_id=pr_details['installation_id']
                     )

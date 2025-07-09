@@ -6,7 +6,7 @@ import asyncio
 from github_utils import GitHubUtils
 from mcp_client import MCPClient
 from secret_utils import SecretUtils
-from rag_utils import RAGUtils # Import RAGUtils
+from rag_utils import RAGUtils
 
 # Configure logging
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -22,12 +22,13 @@ logger.info(f"Lambda function initializing with log level: {log_level}")
 # Global initialization for cold starts
 SECRETS_MANAGER_SECRET_NAME = os.getenv('SECRETS_MANAGER_SECRET_NAME')
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
-BEDROCK_KNOWLEDGE_BASE_ID = os.getenv('BEDROCK_KNOWLEDGE_BASE_ID') # New env var for KB ID
+BEDROCK_KNOWLEDGE_BASE_ID = os.getenv('BEDROCK_KNOWLEDGE_BASE_ID')
+BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'anthropic.claude-3-sonnet-20240229-v1:0')
 
 github_utils = None
 mcp_client = None
 secret_utils = None
-rag_utils = None # Initialize rag_utils globally
+rag_utils = None
 
 try:
     if not SECRETS_MANAGER_SECRET_NAME:
@@ -36,17 +37,23 @@ try:
     secret_utils = SecretUtils(secret_name=SECRETS_MANAGER_SECRET_NAME, region_name=AWS_REGION)
     logger.info("SecretUtils initialized successfully.")
 
-    # Initialize RAGUtils
-    if BEDROCK_KNOWLEDGE_BASE_ID:
-        rag_utils = RAGUtils(knowledge_base_id=BEDROCK_KNOWLEDGE_BASE_ID, region_name=AWS_REGION)
+    # Get model ID and KB ID from secrets if available, otherwise use env var default
+    effective_bedrock_model_id = secret_utils.get_bedrock_model_id() or BEDROCK_MODEL_ID
+    kb_id_from_secrets = secret_utils.get_bedrock_knowledge_base_id()
+    final_kb_id = BEDROCK_KNOWLEDGE_BASE_ID if BEDROCK_KNOWLEDGE_BASE_ID else kb_id_from_secrets
+
+    if final_kb_id:
+        rag_utils = RAGUtils(
+            knowledge_base_id=final_kb_id,
+            region_name=AWS_REGION
+        )
         logger.info("RAGUtils initialized successfully.")
     else:
-        logger.warning("BEDROCK_KNOWLEDGE_BASE_ID not set. RAG knowledge base will not be used.")
+        logger.warning("BEDROCK_KNOWLEDGE_BASE_ID not set (neither env var nor Secrets Manager). RAG knowledge base will not be used.")
 
     github_utils = GitHubUtils(secret_utils=secret_utils)
     logger.info("GitHubUtils initialized successfully using secrets.")
 
-    # Pass rag_utils to MCPClient
     mcp_client = MCPClient(github_utils=github_utils, secret_utils=secret_utils, rag_utils=rag_utils)
     logger.info("MCPClient (Bedrock integration) initialized successfully using secrets and RAGUtils.")
 
@@ -173,7 +180,8 @@ def lambda_handler(event, context):
                 "diff_url": payload['pull_request']['diff_url'],
                 "repo_name": payload['repository']['name'],
                 "repo_owner": payload['repository']['owner']['login'],
-                "installation_id": payload['installation']['id']
+                "installation_id": payload['installation']['id'],
+                "commit_sha": payload['pull_request']['head']['sha'] # Added for get_file_content_at_pr_head
             }
             logger.debug(f"PR Details extracted: {pr_details}")
 
@@ -191,16 +199,16 @@ def lambda_handler(event, context):
                 logger.info(f"Received review output from Bedrock for PR #{pr_details['pr_id']}.")
                 logger.debug(
                     f"Review Output: Summary='{review_output.summary[:100]}...' "
-                    f"Line Comments={len(review_output.line_comments)} "
-                    f"General Comments={len(review_output.general_comments)} "
+                    f"Inline Comments={len(review_output.inline_comments)} "
+                    f"File Comments={len(review_output.file_comments)} " # Updated
                     f"Security Issues={len(review_output.security_issues)}")
                 try:
                     github_utils.add_pr_review_comments(
                         repo_full_name=f"{pr_details['repo_owner']}/{pr_details['repo_name']}",
                         pr_number=pr_details['pr_id'],
                         summary=review_output.summary,
-                        line_comments=review_output.line_comments,
-                        general_comments=review_output.general_comments,
+                        inline_comments=review_output.inline_comments,
+                        file_comments=review_output.file_comments, # Updated
                         security_issues=review_output.security_issues,
                         installation_id=pr_details['installation_id']
                     )
